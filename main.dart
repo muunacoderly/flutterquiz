@@ -86,7 +86,7 @@ class QuizController with ChangeNotifier {
           'option_d': q['options'][3],
           'correct_index': q['correctIndex'],
           'explanation': q['explanation'] ?? ''
-   ek     });
+        });
         
         // Commit in chunks of 500 for performance
         if (i % 500 == 0) {
