@@ -164,7 +164,7 @@ class _SplashScreenState extends State<SplashScreen> {
     final controller = Provider.of<QuizController>(context, listen: false);
     await controller.checkAndSeed();
     if (mounted) {
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HomeScreen()));
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => HomeScreen()));
     }
   }
 
