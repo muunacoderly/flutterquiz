@@ -195,10 +195,11 @@ class _SplashScreenState extends State<SplashScreen> {
 }
 
 class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key}); // Keep this const
+  // 1. Remove 'const' from here
+  HomeScreen({super.key}); 
 
-  // REMOVE 'const' from the list literal below
-  final List<Map<String, dynamic>> subjects = [ 
+  // 2. Ensure 'const' is NOT used before the [ bracket
+  final List<Map<String, dynamic>> subjects = [
     {'name': 'Geography', 'icon': Icons.public, 'color': Colors.blue},
     {'name': 'History', 'icon': Icons.history_edu, 'color': Colors.brown},
     {'name': 'Political Science', 'icon': Icons.gavel, 'color': Colors.red},
@@ -207,7 +208,8 @@ class HomeScreen extends StatelessWidget {
     {'name': 'Chemistry', 'icon': Icons.science, 'color': Colors.purple},
     {'name': 'Mathematics', 'icon': Icons.functions, 'color': Colors.indigo},
     {'name': 'General Knowledge', 'icon': Icons.psychology, 'color': Colors.teal},
-    {'name': 'General Science', 'icon': Icons.biotech, 'color': Colors.blueGrey}, // Changed icon name
+    // Remember to use 'biotech' or 'science' instead of 'microscope'
+    {'name': 'General Science', 'icon': Icons.biotech, 'color': Colors.blueGrey},
   ];
 
   @override
