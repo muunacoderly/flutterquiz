@@ -9,83 +9,137 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final db = await initDatabase();
+  
+  // Initialize SQLite Database
+  final database = await initDatabase();
+
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => AppProvider(db)),
+        ChangeNotifierProvider(create: (_) => QuizController(database)),
       ],
       child: const QuizMasterApp(),
     ),
   );
 }
 
-// --- DATABASE LOGIC ---
+// --- DATABASE INITIALIZATION ---
 Future<Database> initDatabase() async {
-  String path = p.join(await getDatabasesPath(), 'quizmaster.db');
+  String path = p.join(await getDatabasesPath(), 'quiz_master.db');
   return await openDatabase(
     path,
     version: 1,
     onCreate: (db, version) async {
+      // Questions Table (Subject-wise 4,500 rows)
+      await db.execute('''
+        CREATE TABLE questions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          subject TEXT,
+          difficulty TEXT,
+          question_text TEXT,
+          option_a TEXT,
+          option_b TEXT,
+          option_c TEXT,
+          option_d TEXT,
+          correct_index INTEGER,
+          explanation TEXT
+        )
+      ''');
+      // Profiles Table
       await db.execute('CREATE TABLE profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, avatar TEXT)');
-      await db.execute('CREATE TABLE questions (id INTEGER PRIMARY KEY, subject TEXT, difficulty TEXT, question_text TEXT, option_a TEXT, option_b TEXT, option_c TEXT, option_d TEXT, correct_index INTEGER, explanation TEXT)');
-      await db.execute('CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id INTEGER, subject TEXT, score INTEGER, total INTEGER, date TEXT)');
+      // History/Sessions Table
+      await db.execute('CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, subject TEXT, score INTEGER, total INTEGER, date TEXT)');
     },
   );
 }
 
-// --- STATE MANAGEMENT ---
-class AppProvider extends ChangeNotifier {
+// --- STATE & LOGIC CONTROLLER ---
+class QuizController with ChangeNotifier {
   final Database db;
-  Map<String, dynamic>? activeProfile;
-  
-  AppProvider(this.db);
+  bool isSeeding = false;
+  double seedProgress = 0.0;
 
-  Future<void> seedQuestions() async {
+  QuizController(this.db);
+
+  // Parse assets/questions.json and insert into SQLite
+  Future<void> checkAndSeed() async {
     final prefs = await SharedPreferences.getInstance();
-    if (prefs.getBool('seeded') ?? false) return;
+    if (prefs.getBool('db_seeded') ?? false) return;
 
-    final String response = await rootBundle.loadString('assets/questions.json');
-    final List<dynamic> data = json.decode(response);
-    
-    Batch batch = db.batch();
-    for (var q in data) {
-      batch.insert('questions', {
-        'subject': q['subject'],
-        'difficulty': q['difficulty'],
-        'question_text': q['question'],
-        'option_a': q['options'][0],
-        'option_b': q['options'][1],
-        'option_c': q['options'][2],
-        'option_d': q['options'][3],
-        'correct_index': q['correctIndex'],
-        'explanation': q['explanation']
-      });
+    isSeeding = true;
+    notifyListeners();
+
+    try {
+      final String response = await rootBundle.loadString('assets/questions.json');
+      final List<dynamic> data = json.decode(response);
+      
+      Batch batch = db.batch();
+      for (int i = 0; i < data.length; i++) {
+        var q = data[i];
+        batch.insert('questions', {
+          'subject': q['subject'],
+          'difficulty': q['difficulty'] ?? 'easy',
+          'question_text': q['question'],
+          'option_a': q['options'][0],
+          'option_b': q['options'][1],
+          'option_c': q['options'][2],
+          'option_d': q['options'][3],
+          'correct_index': q['correctIndex'],
+          'explanation': q['explanation'] ?? ''
+   ek     });
+        
+        // Commit in chunks of 500 for performance
+        if (i % 500 == 0) {
+          await batch.commit(noResult: true);
+          batch = db.batch();
+          seedProgress = i / data.length;
+          notifyListeners();
+        }
+      }
+      await batch.commit(noResult: true);
+      await prefs.setBool('db_seeded', true);
+    } catch (e) {
+      debugPrint("Error seeding: $e");
     }
-    await batch.commit(noResult: true);
-    await prefs.setBool('seeded', true);
+
+    isSeeding = false;
+    notifyListeners();
   }
 
-  Future<List<Map<String, dynamic>>> getQuestions(String subject, String diff, int limit) async {
-    return await db.query('questions', 
-      where: 'subject = ? AND difficulty = ?', 
-      whereArgs: [subject, diff], 
-      orderBy: 'RANDOM()', 
-      limit: limit);
+  Future<List<Map<String, dynamic>>> loadQuestions(String subject, int limit) async {
+    return await db.query(
+      'questions',
+      where: 'subject = ?',
+      whereArgs: [subject],
+      orderBy: 'RANDOM()',
+      limit: limit,
+    );
+  }
+
+  Future<void> saveResult(String subject, int score, int total) async {
+    await db.insert('sessions', {
+      'subject': subject,
+      'score': score,
+      'total': total,
+      'date': DateTime.now().toIso8601String(),
+    });
   }
 }
 
-// --- UI COMPONENTS ---
+// --- UI LAYERS ---
+
 class QuizMasterApp extends StatelessWidget {
   const QuizMasterApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      title: 'QuizMaster Pro',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple, brightness: Brightness.light),
         textTheme: GoogleFonts.poppinsTextTheme(),
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
       ),
       home: const SplashScreen(),
     );
@@ -94,6 +148,7 @@ class QuizMasterApp extends StatelessWidget {
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
+
   @override
   State<SplashScreen> createState() => _SplashScreenState();
 }
@@ -102,24 +157,56 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   void initState() {
     super.initState();
-    _bootstrap();
+    _init();
   }
 
-  _bootstrap() async {
-    await Provider.of<AppProvider>(context, listen: false).seedQuestions();
-    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HomeScreen()));
+  _init() async {
+    final controller = Provider.of<QuizController>(context, listen: false);
+    await controller.checkAndSeed();
+    if (mounted) {
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HomeScreen()));
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    final controller = context.watch<QuizController>();
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.quiz_rounded, size: 100, color: Colors.deepPurple),
+            const SizedBox(height: 24),
+            if (controller.isSeeding) ...[
+              const Text("Optimizing 4,500 Questions...", style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: 200,
+                child: LinearProgressIndicator(value: controller.seedProgress),
+              ),
+            ] else 
+              const CircularProgressIndicator(),
+          ],
+        ),
+      ),
+    );
   }
 }
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
-  final List<String> subjects = const [
-    'Geography', 'History', 'Political Science', 'Physics', 'Biology', 'Chemistry', 'Mathematics', 'General Knowledge', 'General Science'
+
+  final List<Map<String, dynamic>> subjects = const [
+    {'name': 'Geography', 'icon': Icons.public, 'color': Colors.blue},
+    {'name': 'History', 'icon': Icons.history_edu, 'color': Colors.brown},
+    {'name': 'Political Science', 'icon': Icons.gavel, 'color': Colors.red},
+    {'name': 'Physics', 'icon': Icons.bolt, 'color': Colors.orange},
+    {'name': 'Biology', 'icon': Icons.biotech, 'color': Colors.green},
+    {'name': 'Chemistry', 'icon': Icons.science, 'color': Colors.purple},
+    {'name': 'Mathematics', 'icon': Icons.functions, 'color': Colors.indigo},
+    {'name': 'General Knowledge', 'icon': Icons.psychology, 'color': Colors.teal},
+    {'name': 'General Science', 'icon': Icons.microscope, 'color': Colors.blueGrey},
   ];
 
   @override
@@ -128,39 +215,48 @@ class HomeScreen extends StatelessWidget {
       appBar: AppBar(title: const Text("QuizMaster Pro"), centerTitle: true),
       body: GridView.builder(
         padding: const EdgeInsets.all(16),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 2, crossAxisSpacing: 10, mainAxisSpacing: 10),
-        itemCount: subjects.length,
-        itemBuilder: (context, i) => Card(
-          elevation: 4,
-          child: InkWell(
-            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => QuizScreen(subject: subjects[i]))),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.school, size: 40, color: Colors.indigo),
-                const SizedBox(height: 10),
-                Text(subjects[i], style: const TextStyle(fontWeight: FontWeight.bold), textAlign: TextAlign.center),
-              ],
-            ),
-          ),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 2, 
+          crossAxisSpacing: 16, 
+          mainAxisSpacing: 16
         ),
+        itemCount: subjects.length,
+        itemBuilder: (context, i) {
+          return Card(
+            clipBehavior: Clip.antiAlias,
+            elevation: 4,
+            child: InkWell(
+              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => QuizPlayScreen(subject: subjects[i]['name']))),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(subjects[i]['icon'], size: 50, color: subjects[i]['color']),
+                  const SizedBox(height: 8),
+                  Text(subjects[i]['name'], textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  const Text("500 Questions", style: TextStyle(fontSize: 10, color: Colors.grey)),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }
 }
 
-class QuizScreen extends StatefulWidget {
+class QuizPlayScreen extends StatefulWidget {
   final String subject;
-  const QuizScreen({super.key, required this.subject});
+  const QuizPlayScreen({super.key, required this.subject});
+
   @override
-  State<QuizScreen> createState() => _QuizScreenState();
+  State<QuizPlayScreen> createState() => _QuizPlayScreenState();
 }
 
-class _QuizScreenState extends State<QuizScreen> {
+class _QuizPlayScreenState extends State<QuizPlayScreen> {
   List<Map<String, dynamic>> questions = [];
   int currentIdx = 0;
   int score = 0;
-  bool loading = true;
+  bool isLoading = true;
 
   @override
   void initState() {
@@ -169,54 +265,74 @@ class _QuizScreenState extends State<QuizScreen> {
   }
 
   _load() async {
-    questions = await Provider.of<AppProvider>(context, listen: false).getQuestions(widget.subject, 'easy', 10);
-    setState(() => loading = false);
+    final list = await Provider.of<QuizController>(context, listen: false).loadQuestions(widget.subject, 10);
+    setState(() {
+      questions = list;
+      isLoading = false;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    if (loading) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (isLoading) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (questions.isEmpty) return const Scaffold(body: Center(child: Text("No questions found for this subject.")));
+
     final q = questions[currentIdx];
+
     return Scaffold(
       appBar: AppBar(title: Text("${widget.subject} (${currentIdx + 1}/10)")),
       body: Padding(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.all(24.0),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(q['question_text'], style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 20),
-            ...['a', 'b', 'c', 'd'].map((opt) {
-              int idx = ['a', 'b', 'c', 'd'].indexOf(opt);
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 50)),
-                  onPressed: () {
-                    if (idx == q['correct_index']) score++;
-                    if (currentIdx < 9) {
-                      setState(() => currentIdx++);
-                    } else {
-                      _showResult();
-                    }
-                  },
-                  child: Text(q['option_$opt']),
-                ),
-              );
-            }).toList(),
+            Text(q['question_text'], style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 30),
+            _buildOption(0, q['option_a']),
+            _buildOption(1, q['option_b']),
+            _buildOption(2, q['option_c']),
+            _buildOption(3, q['option_d']),
           ],
         ),
       ),
     );
   }
 
-  _showResult() {
+  Widget _buildOption(int index, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: ElevatedButton(
+        style: ElevatedButton.styleFrom(padding: const EdgeInsets.all(16)),
+        onPressed: () => _handleAnswer(index),
+        child: Text(text, style: const TextStyle(fontSize: 16)),
+      ),
+    );
+  }
+
+  void _handleAnswer(int selected) {
+    if (selected == questions[currentIdx]['correct_index']) score++;
+    
+    if (currentIdx < 9) {
+      setState(() => currentIdx++);
+    } else {
+      Provider.of<QuizController>(context, listen: false).saveResult(widget.subject, score, 10);
+      _showResult();
+    }
+  }
+
+  void _showResult() {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        title: const Text("Quiz Complete!"),
-        content: Text("You scored $score out of 10"),
-        actions: [TextButton(onPressed: () => Navigator.popUntil(context, (r) => r.isFirst), child: const Text("Finish"))],
+      builder: (context) => AlertDialog(
+        title: const Text("Quiz Finished!"),
+        content: Text("Subject: ${widget.subject}\nScore: $score / 10"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.popUntil(context, (route) => route.isFirst), 
+            child: const Text("Back to Home")
+          )
+        ],
       ),
     );
   }
